@@ -1,0 +1,1 @@
+cmd_/home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/pubsub_driver.o := ld -m elf_i386  -r -o /home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/pubsub_driver.o /home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/main_driver.o /home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/broker.o 

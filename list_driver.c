@@ -5,7 +5,7 @@
 
 int list_add_entry(struct list_head *head, const char *data)
 {
-    struct message_s *new_node = kmalloc(sizeof(struct message_s), GFP_KERNEL);
+    message_s *new_node = kmalloc(sizeof(message_s), GFP_KERNEL);
     
     if (!new_node) {
         printk(KERN_ERR "Memory allocation failed.\n");
@@ -22,7 +22,7 @@ int list_add_entry(struct list_head *head, const char *data)
 
 void list_show(struct list_head *head)
 {
-    struct message_s *entry = NULL;
+    message_s *entry = NULL;
     int i = 0;
     
     list_for_each_entry(entry, head, link) {
@@ -32,14 +32,14 @@ void list_show(struct list_head *head)
 
 int list_delete_head(struct list_head *head)
 {
-    struct message_s *entry = NULL;
+    message_s *entry = NULL;
     
     if (list_empty(head)) {
         printk(KERN_INFO "Empty list.\n");
         return 1;
     }
     
-    entry = list_first_entry(head, struct message_s, link);
+    entry = list_first_entry(head, message_s, link);
     
     list_del(&entry->link);
     kfree(entry);
@@ -49,7 +49,7 @@ int list_delete_head(struct list_head *head)
 
 int list_delete_entry(struct list_head *head, const char *data)
 {
-    struct message_s *entry = NULL;
+    message_s *entry = NULL;
     
     list_for_each_entry(entry, head, link) {
         if (strcmp(entry->message, data) == 0) {

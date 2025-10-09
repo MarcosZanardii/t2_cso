@@ -5,8 +5,19 @@
 
 #include "broker.h"
 
-// A instância global do broker para o nosso módulo
+static int max_messages = 5;
+static int max_message_size = 250;
 static broker_s my_broker;
+
+// Função auxiliar para contar mensagens em uma fila, usada para o buffer circular
+static int subscriber_message_count(struct list_head *queue) {
+    int count = 0;
+    struct list_head *entry;
+    list_for_each(entry, queue) {
+        count++;
+    }
+    return count;
+}
 
 void broker_init(void) {
     INIT_LIST_HEAD(&my_broker.topics);
@@ -23,13 +34,8 @@ topic_s *broker_create_topic(int id) {
     }
 
     new_topic->id = id;
-    
-    //inicializa listas relacionada a esse topico
     INIT_LIST_HEAD(&new_topic->subscribers);
-    INIT_LIST_HEAD(&new_topic->publishers);
-    INIT_LIST_HEAD(&new_topic->messages);
 
-    //adiciona o novo topico a lista de topicos do broker
     list_add_tail(&new_topic->topic_node, &my_broker.topics);
 
     printk(KERN_INFO "Topic %d created.\n", id);
@@ -47,76 +53,124 @@ topic_s *broker_find_topic(int id) {
     return NULL;
 }
 
+process_s *topic_find_subscriber(topic_s *topic, int pid) {
+    process_s *entry;
+    list_for_each_entry(entry, &topic->subscribers, subscriber_node) {
+        if (entry->pid == pid) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
 int topic_add_subscriber(topic_s *topic, int pid) {
+    if (topic_find_subscriber(topic, pid) != NULL) {
+        printk(KERN_INFO "PID %d is already a subscriber to topic %d.\n", pid, topic->id);
+        return 0;
+    }
 
     process_s *new_process = kmalloc(sizeof(*new_process), GFP_KERNEL);
-
     if (!new_process) {
-        printk(KERN_ERR "Failed to allocate memory for subscriber.\n");
+        printk(KERN_ERR "Failed to allocate memory for new subscriber.\n");
         return -ENOMEM;
     }
 
     new_process->pid = pid;
-
-    //relaciona o sub do processo a lista de subs do broker
+    INIT_LIST_HEAD(&new_process->message_queue);
     list_add_tail(&new_process->subscriber_node, &topic->subscribers);
 
-    printk(KERN_INFO "PID %d added as subscriber to topic %d.\n", pid, topic->id);
+    printk(KERN_INFO "PID %d added as a subscriber to topic %d.\n", pid, topic->id);
     return 0;
 }
 
-int topic_publish_message(topic_s *topic, const char *message_data, short max_size) {
-    //adicionar o pid de quem publicou**********
-    message_s *new_msg = kmalloc(sizeof(*new_msg), GFP_KERNEL);
-    if (!new_msg) {
-        printk(KERN_ERR "Failed to allocate memory for new message.\n");
-        return -ENOMEM;
+int topic_publish_message(topic_s *topic, const char *message_data, short data_size) {
+    if (data_size > max_message_size) {
+        printk(KERN_ALERT "PubSub Driver: Message too large, discarded.\n");
+        return -EINVAL;
+    }
+    
+    process_s *subscriber;
+    list_for_each_entry(subscriber, &topic->subscribers, subscriber_node) {
+        message_s *new_msg = kmalloc(sizeof(*new_msg), GFP_KERNEL);
+        if (!new_msg) {
+            printk(KERN_ERR "Failed to allocate memory for new message for PID %d.\n", subscriber->pid);
+            continue;
+        }
+
+        strncpy(new_msg->message, message_data, min_t(short, max_message_size, data_size));
+        new_msg->message[min_t(short, max_message_size, data_size)] = '\0';
+        new_msg->size = min_t(short, max_message_size, data_size);
+
+        if (subscriber_message_count(&subscriber->message_queue) >= max_messages) {
+            message_s *oldest_msg = list_first_entry(&subscriber->message_queue, message_s, link);
+            list_del(&oldest_msg->link);
+            kfree(oldest_msg);
+            printk(KERN_ALERT "PubSub Driver: Discarding old message for PID %d on topic %d.\n", subscriber->pid, topic->id);
+        }
+
+        list_add_tail(&new_msg->link, &subscriber->message_queue);
     }
 
-    strncpy(new_msg->message, message_data, min_t(short, max_size, MSG_SIZE));
-    new_msg->message[min_t(short, max_size, MSG_SIZE) - 1] = '\0'; // Garantir terminação de string
-    new_msg->size = min_t(short, max_size, MSG_SIZE);
-
-    //adiciona mensagem no topico
-    list_add_tail(&new_msg->link, &topic->messages);
-    printk(KERN_INFO "Message published to topic %d: \"%s\".\n", topic->id, new_msg->message);
+    printk(KERN_INFO "Message published to topic %d: \"%s\".\n", topic->id, message_data);
     return 0;
 }
 
 
-message_s *topic_read_message(topic_s *topic) {
+int topic_remove_subscriber(topic_s *topic, int pid) {
+    process_s *entry, *temp;
+    
+    list_for_each_entry_safe(entry, temp, &topic->subscribers, subscriber_node) {
+        if (entry->pid == pid) {
+            if (!list_empty(&entry->message_queue)) {
+                printk(KERN_ALERT "PubSub Driver: Unsubscribing PID %d with unread messages on topic %d.\n", pid, topic->id);
+            }
+            
+            message_s *msg_entry, *msg_temp;
+            list_for_each_entry_safe(msg_entry, msg_temp, &entry->message_queue, link) {
+                list_del(&msg_entry->link);
+                kfree(msg_entry);
+            }
+            
+            list_del(&entry->subscriber_node);
+            kfree(entry);
+            printk(KERN_INFO "PID %d unsubscribed from topic %d.\n", pid, topic->id);
+            return 0;
+        }
+    }
+    
+    printk(KERN_INFO "PID %d was not found as a subscriber to topic %d.\n", pid, topic->id);
+    return -EINVAL;
+}
+
+
+message_s *subscriber_read_message(process_s *subscriber) {
     message_s *first_msg;
-    if (list_empty(&topic->messages)) {
+    if (list_empty(&subscriber->message_queue)) {
         return NULL;
     }
 
-    first_msg = list_first_entry(&topic->messages, message_s, link);
+    first_msg = list_first_entry(&subscriber->message_queue, message_s, link);
     list_del(&first_msg->link);
-    printk(KERN_INFO "Message read from topic %d: \"%s\".\n", topic->id, first_msg->message);
-
+    printk(KERN_INFO "Message read by PID %d: \"%s\".\n", subscriber->pid, first_msg->message);
     return first_msg;
 }
 
+
 void broker_cleanup(void) {
     topic_s *topic_entry, *topic_temp;
-    message_s *msg_entry, *msg_temp;
     process_s *proc_entry, *proc_temp;
     
-    // 1. Libera todos os tópicos
     list_for_each_entry_safe(topic_entry, topic_temp, &my_broker.topics, topic_node) {
-        // 2. Para cada tópico, libera as mensagens e os processos
-        list_for_each_entry_safe(msg_entry, msg_temp, &topic_entry->messages, link) {
-            list_del(&msg_entry->link);
-            kfree(msg_entry);
-        }
         list_for_each_entry_safe(proc_entry, proc_temp, &topic_entry->subscribers, subscriber_node) {
+            message_s *msg_entry, *msg_temp;
+            list_for_each_entry_safe(msg_entry, msg_temp, &proc_entry->message_queue, link) {
+                list_del(&msg_entry->link);
+                kfree(msg_entry);
+            }
             list_del(&proc_entry->subscriber_node);
             kfree(proc_entry);
         }
-        list_for_each_entry_safe(proc_entry, proc_temp, &topic_entry->publishers, publisher_node) {
-            list_del(&proc_entry->publisher_node);
-            kfree(proc_entry);
-        }
+        
         list_del(&topic_entry->topic_node);
         kfree(topic_entry);
     }
