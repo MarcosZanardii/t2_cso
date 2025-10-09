@@ -1,1 +1,0 @@
-cmd_/home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/built-in.o :=  rm -f /home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/built-in.o; ar rcSTPD /home/marcos/Documentos/facul/CSO/buildroot-2024.05.2/modules/pubsub/built-in.o
