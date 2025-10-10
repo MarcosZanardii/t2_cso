@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/sched.h>
+#include <linux/moduleparam.h>
 
 #include "broker.h"
 
@@ -17,7 +18,7 @@ INICIALIZACAO E CONFIG DO DRIVER
 
 #define DEVICE_NAME "pubsub_driver"
 #define CLASS_NAME  "pubsub_class"
-#define MAX_COMMAND_LENGTH 256
+#define MAX_COMMAND_LENGTH 128
 
 MODULE_LICENSE("GPL");
 
@@ -25,11 +26,17 @@ static int majorNumber;
 static int number_opens = 0;
 static struct class *charClass = NULL;
 static struct device *charDevice = NULL;
+int max_msg_size; 
+int max_msg_n;
 
 static int  dev_open(struct inode *, struct file *);
 static int  dev_release(struct inode *, struct file *);
 static ssize_t  dev_read(struct file *, char *, size_t, loff_t *);
 static ssize_t  dev_write(struct file *, const char *, size_t, loff_t *);
+
+module_param(max_msg_size, int, 0); 
+module_param(max_msg_n, int, 0); 
+MODULE_PARM_DESC(max_msg_size, "Maximum message size in bytes.");
 
 static struct file_operations fops =
 {
@@ -44,6 +51,9 @@ static int pubsub_init(void)
     printk(KERN_INFO "[PUBSUB] Initializing the LKM\n");
 
     broker_init();
+
+	printk(KERN_INFO "[PUBSUB] Max size message: %d\n", max_msg_size);
+	printk(KERN_INFO "[PUBSUB] Max n message: %d\n", max_msg_n);
 
     majorNumber = register_chrdev(0, DEVICE_NAME, &fops);
     if (majorNumber < 0) {
@@ -122,11 +132,19 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     return ret;
 }
 
+#include <linux/string.h>
+#include <linux/slab.h>
+#include <linux/sched.h>
+#include <linux/uaccess.h>
+#include "broker.h"
+
+#define MAX_COMMAND_LENGTH 256
+
 static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset)
 {
     char *kernel_buffer;
     char instruction[20];
-    int topic_id;
+    char topic_name[64];
     int ret = -EINVAL;
     pid_t current_pid = task_pid_nr(current);
 
@@ -148,74 +166,88 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
 
     printk(KERN_INFO "[PUBSUB] Received command '%s'\n", kernel_buffer);
 
-    if (sscanf(kernel_buffer, "%19s %d", instruction, &topic_id) == 2) {
+    if (sscanf(kernel_buffer, "%19s", instruction) == 1) {
         if (strcmp(instruction, "/subscribe") == 0) {
-            topic_s *topic = broker_find_topic(topic_id);
-            if (!topic) {
-                topic = broker_create_topic(topic_id);
-            }
-            if (topic) {
-                topic_add_subscriber(topic, current_pid);
-                ret = len;
-            } else {
-                ret = -ENOMEM;
-            }
-        } else if (strcmp(instruction, "/unsubscribe") == 0) {
-            topic_s *topic = broker_find_topic(topic_id);
-            if (topic) {
-                topic_remove_subscriber(topic, current_pid); // Pass topic without &
-                ret = len;
-            } else {
-                printk(KERN_INFO "[PUBSUB] Topic %d not found for unsubscribing.\n", topic_id);
-                ret = -EINVAL;
-            }
-        } else if (strcmp(instruction, "/fetch") == 0) {
-            topic_s *topic = broker_find_topic(topic_id);
-            if (topic) {
-                // Store the topic ID in the file's private data for dev_read to use
-                int *topic_ptr = kmalloc(sizeof(int), GFP_KERNEL);
-                if (topic_ptr) {
-                    *topic_ptr = topic_id;
-                    filep->private_data = topic_ptr;
-                    printk(KERN_INFO "[PUBSUB] Topic %d set for read operations.\n", topic_id);
+            if (sscanf(kernel_buffer, "/subscribe %63s", topic_name) == 1) {
+                topic_s *topic = broker_find_topic(topic_name);
+                if (!topic) {
+                    topic = broker_create_topic(topic_name);
+                }
+                if (topic) {
+                    topic_add_subscriber(topic, current_pid);
                     ret = len;
                 } else {
                     ret = -ENOMEM;
                 }
             } else {
-                printk(KERN_INFO "[PUBSUB] Topic %d not found for fetching.\n", topic_id);
-                ret = -EINVAL;
+                printk(KERN_INFO "[PUBSUB] Invalid /subscribe command format.\n");
             }
-        }
-    } else if (strncmp(kernel_buffer, "/publish", 8) == 0) {
-        // Publish command handling for multi-word messages
-        char *message_start = strchr(kernel_buffer + 8, ' ');
-        if (message_start) {
-            int topic_id_pub;
-            char *topic_str = message_start + 1;
-            sscanf(topic_str, "%d", &topic_id_pub);
-            
-            char *message_content = strchr(topic_str, '"');
-            if (message_content) {
-                message_content++; // Move past the quote
-                char *end_of_message = strrchr(message_content, '"');
-                if (end_of_message) {
-                    *end_of_message = '\0';
-                    topic_s *topic = broker_find_topic(topic_id_pub);
-                    if (topic) {
-                        topic_publish_message(topic, message_content, (short)strlen(message_content));
+        } else if (strcmp(instruction, "/unsubscribe") == 0) {
+            if (sscanf(kernel_buffer, "/unsubscribe %63s", topic_name) == 1) {
+                topic_s *topic = broker_find_topic(topic_name);
+                if (topic) {
+                    topic_remove_subscriber(topic, current_pid);
+                    ret = len;
+                } else {
+                    printk(KERN_INFO "[PUBSUB] Topic %s not found for unsubscribing.\n", topic_name);
+                    ret = -EINVAL;
+                }
+            } else {
+                printk(KERN_INFO "[PUBSUB] Invalid /unsubscribe command format.\n");
+            }
+        } else if (strcmp(instruction, "/fetch") == 0) {
+            if (sscanf(kernel_buffer, "/fetch %63s", topic_name) == 1) {
+                topic_s *topic = broker_find_topic(topic_name);
+                if (topic) {
+                    char *topic_ptr = kmalloc(strlen(topic_name) + 1, GFP_KERNEL);
+                    if (topic_ptr) {
+                        strcpy(topic_ptr, topic_name);
+                        filep->private_data = topic_ptr;
+                        printk(KERN_INFO "[PUBSUB] Topic %s set for read operations.\n", topic_name);
                         ret = len;
                     } else {
-                        printk(KERN_INFO "[PUBSUB] Topic %d not found for publishing.\n", topic_id_pub);
+                        ret = -ENOMEM;
+                    }
+                } else {
+                    printk(KERN_INFO "[PUBSUB] Topic %s not found for fetching.\n", topic_name);
+                    ret = -EINVAL;
+                }
+            } else {
+                printk(KERN_INFO "[PUBSUB] Invalid /fetch command format.\n");
+            }
+        } else if (strcmp(instruction, "/publish") == 0) {
+            char *topic_start = strchr(kernel_buffer, ' ');
+            if (topic_start) {
+                char *topic_end = strchr(topic_start + 1, ' ');
+                if (topic_end) {
+                    *topic_end = '\0';
+                    char *message_content = strchr(topic_end + 1, '"');
+                    if (message_content) {
+                        message_content++;
+                        char *end_of_message = strrchr(message_content, '"');
+                        if (end_of_message) {
+                            *end_of_message = '\0';
+                            topic_s *topic = broker_find_topic(topic_start + 1);
+                            if (topic) {
+                                topic_publish_message(topic, message_content, (short)strlen(message_content));
+                                ret = len;
+                            } else {
+                                printk(KERN_INFO "[PUBSUB] Topic %s not found for publishing.\n", topic_start + 1);
+                                ret = -EINVAL;
+                            }
+                        } else {
+                            printk(KERN_INFO "[PUBSUB] Publish message is not properly quoted.\n");
+                        }
                     }
                 }
             }
+        } else {
+            printk(KERN_INFO "[PUBSUB] Unknown command: %s\n", instruction);
         }
     } else {
-        printk(KERN_INFO "[PUBSUB] Unknown command '%s'\n", kernel_buffer);
-        ret = -EINVAL;
+        printk(KERN_INFO "[PUBSUB] Invalid command format.\n");
     }
-    
+
     kfree(kernel_buffer);
     return (ret > 0) ? len : ret;
 }
