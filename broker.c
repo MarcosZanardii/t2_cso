@@ -62,10 +62,10 @@ topic_s *broker_find_topic(char list_type, const char *name) {
 
 //deve se criar para sub tb????????
 topic_s *broker_find_or_create_topic(char list_type, const char *name) {
-    topic_s *topic;
-    
-    topic = broker_find_topic(list_type, name);
-
+     topic_s *topic;
+     
+     topic = broker_find_topic(list_type, name);
+ 
     if (!topic && list_type == 'p') {
         topic = kmalloc(sizeof(*topic), GFP_KERNEL);
         if (!topic) {
@@ -86,12 +86,39 @@ topic_s *broker_find_or_create_topic(char list_type, const char *name) {
         insert_topic_to_broker(topic, 'p');
         printk(KERN_INFO "New topic '%s' created and added to publish list.\n", name);
     } else if (!topic && list_type == 's') {
+        //alteraçao
         printk(KERN_ERR "Cannot subscribe to a non-existent topic '%s'.\n", name);
         return NULL;
     }
-    
-    return topic;
-}
+    if (!topic && (list_type == 'p' || list_type == 's')) {
+        topic = kmalloc(sizeof(*topic), GFP_KERNEL);
+        if (!topic) {
+            printk(KERN_ERR "Failed to create new topic '%s'.\n", name);
+            return NULL;
+        }
+
+        topic->name = kstrdup(name, GFP_KERNEL);
+        if (!topic->name) {
+            kfree(topic);
+            printk(KERN_ERR "Failed to allocate name for new topic '%s'.\n", name);
+            return NULL;
+        }
+
+        INIT_LIST_HEAD(&topic->message_queue);
+        INIT_LIST_HEAD(&topic->publish_node);
+        INIT_LIST_HEAD(&topic->subscribe_node);
+
+        /* adiciona o novo tópico apenas na lista solicitada */
+        insert_topic_to_broker(topic, list_type);
+
+        if (list_type == 'p')
+            printk(KERN_INFO "New topic '%s' created and added to publish list.\n", name);
+        else
+            printk(KERN_INFO "New topic '%s' created and added to subscriber list.\n", name);
+    }
+     
+     return topic;
+ }
 
 int register_process_to_topic(const char *topic_name, char list_type, int pid) {
     topic_s *topic;
