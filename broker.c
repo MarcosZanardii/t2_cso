@@ -8,19 +8,12 @@
 static broker_s my_broker;
 
 void broker_init(void) {
-
     INIT_LIST_HEAD(&my_broker.subscriber);
     INIT_LIST_HEAD(&my_broker.publish);
-
     printk(KERN_INFO "Broker initialized.\n");
 }
 
 void insert_topic_to_broker(topic_s *topic, char list_type) {
-    if (!topic) {
-        printk(KERN_ERR "Cannot insert a NULL topic.\n");
-        return;
-    }
-
     if (list_type == 's') {
         list_add_tail(&topic->subscribe_node, &my_broker.subscriber);
         printk(KERN_INFO "Topic '%s' added to broker's subscriber list.\n", topic->name);
@@ -32,91 +25,88 @@ void insert_topic_to_broker(topic_s *topic, char list_type) {
     }
 }
 
-topic_s *broker_find_topic(char list_type, const char *name) {
+topic_s *find_topic(const char *name) {
     topic_s *entry;
-    struct list_head *topic_list_head;
-
-    if (list_type == 's') {
-        topic_list_head = &my_broker.subscriber;
-        list_for_each_entry(entry, topic_list_head, subscribe_node) {
-            if (strcmp(entry->name, name) == 0) {
-                printk(KERN_INFO "Found topic '%s' in the subscriber list.\n", name);
-                return entry;
-            }
+    
+    list_for_each_entry(entry, &my_broker.publish, publish_node) {
+        if (strcmp(entry->name, name) == 0) {
+            printk(KERN_INFO "Found topic '%s' in the publish list.\n", name);
+            return entry;
         }
-    } else if (list_type == 'p') {
-        topic_list_head = &my_broker.publish;
-        list_for_each_entry(entry, topic_list_head, publish_node) {
-            if (strcmp(entry->name, name) == 0) {
-                printk(KERN_INFO "Found topic '%s' in the publish list.\n", name);
-                return entry;
-            }
-        }
-    } else {
-        printk(KERN_WARNING "Invalid list type '%c' for topic search.\n", list_type);
     }
 
-    printk(KERN_INFO "Topic '%s' not found in the specified list.\n", name);
+    list_for_each_entry(entry, &my_broker.subscriber, subscribe_node) {
+        if (strcmp(entry->name, name) == 0) {
+            printk(KERN_INFO "Found topic '%s' in the subscriber list.\n", name);
+            return entry;
+        }
+    }
+    printk(KERN_INFO "Topic '%s' not found in either list.\n", name);
     return NULL;
 }
 
-topic_s *broker_find_or_create_topic(char list_type, const char *name) {
+topic_s *create_topic(const char *name) {
     topic_s *topic;
     
-    topic = broker_find_topic(list_type, name);
-
+    topic = kmalloc(sizeof(*topic), GFP_KERNEL);
     if (!topic) {
-        printk(KERN_INFO "Topic '%s' not found. Creating a new one.\n", name);
-        topic = kmalloc(sizeof(*topic), GFP_KERNEL);
-        if (!topic) {
-            printk(KERN_ERR "Failed to allocate memory for new topic.\n");
-            return NULL;
-        }
-
-        topic->name = kstrdup(name, GFP_KERNEL);
-        if (!topic->name) {
-            kfree(topic);
-            return NULL;
-        }
-
-        INIT_LIST_HEAD(&topic->message_queue);
-        INIT_LIST_HEAD(&topic->publish_node);
-        INIT_LIST_HEAD(&topic->subscribe_node);
-
-        // Insere o novo tópico na lista apropriada, dependendo do list_type.
-        if (list_type == 'p') {
-            insert_topic_to_broker(topic, 'p');
-            printk(KERN_INFO "New topic '%s' created and added to publish list.\n", name);
-        } else if (list_type == 's') {
-            insert_topic_to_broker(topic, 's');
-            printk(KERN_INFO "New topic '%s' created and added to subscriber list.\n", name);
-        } else {
-            printk(KERN_WARNING "Invalid list type '%c' for topic creation.\n", list_type);
-            kfree(topic->name);
-            kfree(topic);
-            return NULL;
-        }
+        printk(KERN_ERR "Failed to allocate memory for new topic.\n");
+        return NULL;
     }
+
+    topic->name = kstrdup(name, GFP_KERNEL);
+    if (!topic->name) {
+        kfree(topic);
+        return NULL;
+    }
+
+    INIT_LIST_HEAD(&topic->message_queue);
+    INIT_LIST_HEAD(&topic->publish_node);
+    INIT_LIST_HEAD(&topic->subscribe_node);
+    
+    printk(KERN_INFO "New topic '%s' created and added to both lists.\n", name);
     return topic;
 }
 
+process_s *create_process(int pid) {
+    process_s *process;
+    
+    process = kmalloc(sizeof(*process), GFP_KERNEL);
+    if (!process) {
+        printk(KERN_ERR "Failed to allocate memory for new process.\n");
+        return NULL;
+    }
+
+    process->pid = pid;
+    if (!process->pid) {
+        kfree(process);
+        return NULL;
+    }
+
+    INIT_LIST_HEAD(&process->process_node);
+    INIT_LIST_HEAD(&process->publish_node);
+    INIT_LIST_HEAD(&process->subscriber_node);
+    
+    printk(KERN_INFO "New process '%d' created and added to both lists.\n", pid);
+    return process;
+}
 
 int register_process_to_topic(const char *topic_name, char list_type, int pid) {
     topic_s *topic;
     process_s *new_process;
     
-    topic = broker_find_or_create_topic(list_type, topic_name);
+    topic = find_topic(topic_name);
+
     if (!topic) {
-        return -EINVAL;
+        topic = create_topic(topic_name);
     }
     
-    new_process = kmalloc(sizeof(*new_process), GFP_KERNEL);
-    if (!new_process) {
-        printk(KERN_ERR "Failed to allocate memory for new process node.\n");
+    if (!topic) {
+        printk(KERN_ERR "Failed to find or create topic '%s'.\n", topic_name);
         return -ENOMEM;
     }
 
-    new_process->pid = pid;
+    new_process = create_process(pid);
 
     if (list_type == 's') {
         INIT_LIST_HEAD(&new_process->subscriber_node);
@@ -135,7 +125,6 @@ int register_process_to_topic(const char *topic_name, char list_type, int pid) {
     return 0;
 }
     
-//alterar para o nome ou strutc de topic???????????
 int topic_publish_message(topic_s *topic, const char *message_data, short max_size) {
     message_s *new_message;
     size_t data_size = strnlen(message_data, max_size) + 1;
@@ -170,7 +159,7 @@ int topic_publish_message(topic_s *topic, const char *message_data, short max_si
 
 void topic_remove_subscriber(topic_s *topic, int pid) {
     process_s *process, *temp;
-
+    
     if (!topic) {
         printk(KERN_ERR "Cannot remove subscriber from a NULL topic.\n");
         return;

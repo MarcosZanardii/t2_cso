@@ -21,7 +21,7 @@ int main()
     }
     
     while (1) {
-        printf("Enter a command (/subscribe <id>, /publish <id> \"message\", /fetch <id>, etc. or press ENTER to exit):\n");
+        printf("Enter a command (/subscribe <id>, /publish <id> \"message\", /fetch <id> or press ENTER to exit):\n");
         
         memset(stringToSend, 0, BUFFER_LENGTH);
         
