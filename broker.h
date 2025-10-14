@@ -41,5 +41,6 @@ topic_s *broker_find_topic(char list_type, const char *name);
 topic_s *broker_find_or_create_topic(char list_type, const char *name);
 int register_process_to_topic(const char *topic_name, char list_type, int pid);
 int topic_publish_message(topic_s *topic, const char *message_data, short max_size);
+void topic_remove_subscriber(topic, current_pid);
 
 #endif

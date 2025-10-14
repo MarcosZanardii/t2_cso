@@ -60,16 +60,16 @@ topic_s *broker_find_topic(char list_type, const char *name) {
     return NULL;
 }
 
-//deve se criar para sub tb????????
 topic_s *broker_find_or_create_topic(char list_type, const char *name) {
     topic_s *topic;
     
     topic = broker_find_topic(list_type, name);
 
-    if (!topic && list_type == 'p') {
+    if (!topic) {
+        printk(KERN_INFO "Topic '%s' not found. Creating a new one.\n", name);
         topic = kmalloc(sizeof(*topic), GFP_KERNEL);
         if (!topic) {
-            printk(KERN_ERR "Failed to create new topic '%s'.\n", name);
+            printk(KERN_ERR "Failed to allocate memory for new topic.\n");
             return NULL;
         }
 
@@ -83,15 +83,23 @@ topic_s *broker_find_or_create_topic(char list_type, const char *name) {
         INIT_LIST_HEAD(&topic->publish_node);
         INIT_LIST_HEAD(&topic->subscribe_node);
 
-        insert_topic_to_broker(topic, 'p');
-        printk(KERN_INFO "New topic '%s' created and added to publish list.\n", name);
-    } else if (!topic && list_type == 's') {
-        printk(KERN_ERR "Cannot subscribe to a non-existent topic '%s'.\n", name);
-        return NULL;
+        // Insere o novo tópico na lista apropriada, dependendo do list_type.
+        if (list_type == 'p') {
+            insert_topic_to_broker(topic, 'p');
+            printk(KERN_INFO "New topic '%s' created and added to publish list.\n", name);
+        } else if (list_type == 's') {
+            insert_topic_to_broker(topic, 's');
+            printk(KERN_INFO "New topic '%s' created and added to subscriber list.\n", name);
+        } else {
+            printk(KERN_WARNING "Invalid list type '%c' for topic creation.\n", list_type);
+            kfree(topic->name);
+            kfree(topic);
+            return NULL;
+        }
     }
-    
     return topic;
 }
+
 
 int register_process_to_topic(const char *topic_name, char list_type, int pid) {
     topic_s *topic;
@@ -126,8 +134,7 @@ int register_process_to_topic(const char *topic_name, char list_type, int pid) {
     
     return 0;
 }
-
-
+    
 //alterar para o nome ou strutc de topic???????????
 int topic_publish_message(topic_s *topic, const char *message_data, short max_size) {
     message_s *new_message;
@@ -159,4 +166,24 @@ int topic_publish_message(topic_s *topic, const char *message_data, short max_si
     printk(KERN_INFO "Message published to topic '%s'.\n", topic->name);
 
     return 0;
+}
+
+void topic_remove_subscriber(topic_s *topic, int pid) {
+    process_s *process, *temp;
+
+    if (!topic) {
+        printk(KERN_ERR "Cannot remove subscriber from a NULL topic.\n");
+        return;
+    }
+
+    list_for_each_entry_safe(process, temp, &topic->subscribe_node, subscriber_node) {
+        if (process->pid == pid) {
+            printk(KERN_INFO "Removing subscriber with PID %d from topic '%s'.\n", pid, topic->name);
+            list_del(&process->subscriber_node);
+            kfree(process);
+            return;
+        }
+    }
+    
+    printk(KERN_INFO "Subscriber with PID %d not found in topic '%s'.\n", pid, topic->name);
 }
