@@ -194,30 +194,54 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
                 printk(KERN_INFO "[PUBSUB] Invalid /unsubscribe command format.\n");
             }
 
-           /* FETCH   */
-        } else if (strcmp(instruction, "/fetch") == 0) {
-            if (sscanf(kernel_buffer, "/fetch %63s", topic_name) == 1) {
-                topic_s *topic = broker_find_topic('s', topic_name);
-                if (topic) {
-                    char *topic_ptr = kmalloc(strlen(topic_name) + 1, GFP_KERNEL);
-                    if (topic_ptr) {
-                        strcpy(topic_ptr, topic_name);
-                        filep->private_data = topic_ptr;
-                        printk(KERN_INFO "[PUBSUB] Topic '%s' set for read operations.\n", topic_name);
-                        ret = len;
-                    } else {
-                        ret = -ENOMEM;
-                    }
-                } else {
-                    printk(KERN_INFO "[PUBSUB] Topic '%s' not found for fetching.\n", topic_name);
+        /* FETCH   */
+} else if (strcmp(instruction, "/fetch") == 0) {
+    if (sscanf(kernel_buffer, "/fetch %63s", topic_name) == 1) {
+        topic_s *topic = broker_find_topic('s', topic_name);
+        if (!topic) {
+            printk(KERN_INFO "[PUBSUB] Topic '%s' not found for fetching.\n", topic_name);
+            ret = -EINVAL;
+        } else {
+            int topic_id;
+            int *idp;
+
+            /* (opcional porém recomendado)
+               garantir que o processo está registrado como subscriber do tópico */
+            {
+                int r = register_process_to_topic(topic_name, 's', current_pid);
+                if (r != 0 && r != -EEXIST) {
+                    printk(KERN_INFO "[PUBSUB] Failed to subscribe pid %d to '%s' (err=%d)\n",
+                           current_pid, topic_name, r);
                     ret = -EINVAL;
                 }
-            } else {
-                printk(KERN_INFO "[PUBSUB] Invalid /fetch command format.\n");
             }
 
-            /* PUBLISH   */
-        } else if (strcmp(instruction, "/publish") == 0) {
+            /* >>> obtenha o ID inteiro do tópico <<<
+               Se o struct tiver o campo, use topic->id; senão, chame um helper do broker. */
+            topic_id = topic->id;  /* ou: topic_id = broker_get_topic_id(topic); */
+
+            /* aloque um int e grave nele o topic_id, pois o dev_read() espera int* */
+            idp = kmalloc(sizeof(*idp), GFP_KERNEL);
+            if (!idp) {
+                ret = -ENOMEM;
+            }
+            *idp = topic_id;
+
+            /* evitar vazamento caso já tenha um private_data anterior */
+            if (filep->private_data)
+                kfree(filep->private_data);
+
+            filep->private_data = idp;
+
+            printk(KERN_INFO "[PUBSUB] Topic '%s' (id=%d) set for read operations.\n",
+                   topic_name, topic_id);
+            ret = len;
+        }
+    } else {
+        printk(KERN_INFO "[PUBSUB] Invalid /fetch command format.\n");
+        ret = -EINVAL;
+		
+    } else if (strcmp(instruction, "/publish") == 0) {
             char *topic_start = strchr(kernel_buffer, ' ');
 
             if (topic_start) {
