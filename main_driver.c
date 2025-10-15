@@ -253,6 +253,8 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
         printk(KERN_INFO "[PUBSUB] Unknown command: %s\n", cmd);
     }
 
+    show_topics();
+
     kfree(kernel_buffer);
     return (ret > 0) ? len : ret;
 }

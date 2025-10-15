@@ -16,7 +16,7 @@ int main()
     
     fd = open("/dev/pubsub_driver", O_RDWR);
     if (fd < 0) {
-        perror("Failed to open the device /dev/pubsub");
+        perror("Failed to open the device /dev/pubsub_driver");
         return errno;
     }
     
