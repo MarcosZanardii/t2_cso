@@ -285,25 +285,70 @@ void topic_remove_subscriber(topic_s *topic, int pid)
     printk(KERN_WARNING "[REMOVE_SUB] Subscriber PID %d not found in topic '%s'.\n", pid, topic->name);
 }
 
+static void print_topic_details(topic_s *topic)
+{
+    process_s *proc_entry;
+    message_s *msg_entry;
+
+    // Informação principal do tópico
+    printk(KERN_INFO "-> Topic: \"%s\" (Messages: %d)\n", topic->name, topic->msg_count);
+
+    // Lista de Publicadores (Publishers)
+    printk(KERN_INFO "   - Publishers:");
+    if (list_empty(&topic->process_publishers)) {
+        printk(KERN_CONT " [None]\n");
+    } else {
+        printk(KERN_CONT "\n");
+        list_for_each_entry(proc_entry, &topic->process_publishers, publish_node) {
+            printk(KERN_INFO "     - PID: %d\n", proc_entry->pid);
+        }
+    }
+
+    // Lista de Inscritos (Subscribers)
+    printk(KERN_INFO "   - Subscribers:");
+    if (list_empty(&topic->process_subscribers)) {
+        printk(KERN_CONT " [None]\n");
+    } else {
+        printk(KERN_CONT "\n");
+        list_for_each_entry(proc_entry, &topic->process_subscribers, subscriber_node) {
+            printk(KERN_INFO "     - PID: %d\n", proc_entry->pid);
+        }
+    }
+
+    // Fila de Mensagens
+    printk(KERN_INFO "   - Message Queue:");
+    if (list_empty(&topic->message_queue)) {
+        printk(KERN_CONT " [Empty]\n");
+    } else {
+        printk(KERN_CONT "\n");
+        list_for_each_entry(msg_entry, &topic->message_queue, link) {
+            printk(KERN_INFO "     - \"%s\"\n", msg_entry->message);
+        }
+    }
+}
+
 void show_topics(void)
 {
     topic_s *entry;
 
-    printk(KERN_INFO "--- Listing Subscriber Topics ---");
+    printk(KERN_INFO "\n=============== BROKER STATE ===============\n");
+
+    printk(KERN_INFO "--- Topics with Subscribers ---\n");
     if (list_empty(&my_broker.subscriber)) {
-        printk(KERN_INFO "Subscriber list is empty.");
+        printk(KERN_INFO "No topics found in subscriber list.\n");
     } else {
         list_for_each_entry(entry, &my_broker.subscriber, subscribe_node) {
-            printk(KERN_INFO "Topic: %s (Messages: %d)", entry->name, entry->msg_count);
+            print_topic_details(entry);
         }
     }
-    
-    printk(KERN_INFO "--- Listing Publish Topics ---");
+
+    printk(KERN_INFO "\n--- Topics with Publishers ---\n");
     if (list_empty(&my_broker.publish)) {
-        printk(KERN_INFO "Publish list is empty.");
+        printk(KERN_INFO "No topics found in publish list.\n");
     } else {
         list_for_each_entry(entry, &my_broker.publish, publish_node) {
-            printk(KERN_INFO "Topic: %s (Messages: %d)", entry->name, entry->msg_count);
+            print_topic_details(entry);
         }
     }
+    printk(KERN_INFO "==========================================\n");
 }
