@@ -25,24 +25,19 @@ int main()
         
         memset(stringToSend, 0, BUFFER_LENGTH);
         
-        // Read a line from stdin
         if (fgets(stringToSend, BUFFER_LENGTH - 1, stdin) == NULL) {
-            break; // Exit on EOF or error
+            break;
         }
         
-        // Remove the newline character
         stringToSend[strcspn(stringToSend, "\n")] = 0;
-        
-        // Check if the user wants to exit
+    
         if (strlen(stringToSend) == 0) {
             break;
         }
 
-        // Write the command to the kernel module
         ret = write(fd, stringToSend, strlen(stringToSend));
         if (ret < 0) {
             perror("Failed to write to the device");
-            // You might want to handle specific errors differently
         }
     }
 
