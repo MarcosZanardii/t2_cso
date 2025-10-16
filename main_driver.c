@@ -98,54 +98,75 @@ static int dev_open(struct inode *inodep, struct file *filep)
     number_opens++;
     printk(KERN_INFO "[PUBSUB] device has been opened %d time(s)\n", number_opens);
     printk("Process id: %d, name: %s\n", (int) task_pid_nr(current), current->comm);
-    filep->private_data = NULL; // Initialize private data for state management
+    filep->private_data = NULL;
     return 0;
 }
 
-static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset)
+static ssize_t dev_read(struct file *filep, char __user *buffer, size_t len, loff_t *offset)
 {
-    int ret;
-    int pid = (int)task_pid_nr(current);
-    int topic_id;
+    char *topic_name;
+    topic_s *topic;
+    process_s *subscription = NULL; 
+    process_s *iter; 
+    message_s *message_to_read;
+    pid_t current_pid = task_pid_nr(current);
     
-    // Check if the file pointer has a topic associated with it (from a previous /fetch command)
     if (filep->private_data == NULL) {
-        printk(KERN_INFO "[PUBSUB] No topic set for reading. Please use /fetch first.\n");
-        return 0; // Return 0 to indicate no data
+        printk(KERN_INFO "[READ] No topic set. Use '/fetch <topic_name>' first.\n");
+        return 0;
     }
-    
-    // Cast the private data back to the correct type
-    topic_id = *(int *)filep->private_data;
+    topic_name = (char *)filep->private_data;
 
-    // Call the broker function to read a message for the given pid and topic
-    // NOTE: This broker function needs to be implemented to handle per-subscriber queues
-    // ret = broker_read_message_from_queue(pid, topic_id, buffer, len);
-
-    // If there are no more messages, clean up the private data
-    if (ret == 0) {
-        kfree(filep->private_data);
-        filep->private_data = NULL;
+    topic = find_topic(topic_name);
+    if (!topic) {
+        printk(KERN_WARNING "[READ] Fetched topic '%s' no longer exists.\n", topic_name);
+        return -ENOENT;
     }
+
+    list_for_each_entry(iter, &topic->process_subscribers, subscriber_node) {
+        if (iter->pid == current_pid) {
+            subscription = iter;
+            break;
+        }
+    }
+
+    if (!subscription) {
+        printk(KERN_WARNING "[READ] PID %d is not subscribed to topic '%s'.\n", current_pid, topic_name);
+        return -EPERM;
+    }
+
+    if (list_empty(&subscription->message_queue)) {
+        printk(KERN_INFO "[READ] No messages for PID %d in topic '%s'.\n", current_pid, topic_name);
+        return 0;
+    }
+
+    message_to_read = list_first_entry(&subscription->message_queue, message_s, link);
     
-    return ret;
+    if (copy_to_user(buffer, message_to_read->message, min(len, message_to_read->size))) {
+        return -EFAULT;
+    }
+
+    printk(KERN_INFO "[READ] Copied message for PID %d from topic '%s'.\n", current_pid, topic_name);
+    
+    list_del(&message_to_read->link);
+    kfree(message_to_read->message);
+    kfree(message_to_read);
+    subscription->msg_count--;
+
+    return min(len, message_to_read->size);
 }
 
-#include <linux/fs.h>
-#include <linux/slab.h>
-#include <linux/string.h>
-#include <linux/kernel.h>
-#include <linux/uaccess.h>
-#include <linux/sched.h>
-#include <linux/pid.h>
+static int parse_command(char *input, char **cmd, char **arg1, char **arg2) {
+    *cmd = strsep(&input, " ");
+    *arg1 = strsep(&input, " ");
+    *arg2 = input;  // resto da linha (pode ser NULL)
+    return (*cmd != NULL);
+}
 
-#include "broker.h"
-
-#define MAX_COMMAND_LENGTH 128
-
-static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset) {
+static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset)
+{
     char *kernel_buffer;
-    char instruction[20];
-    char topic_name[64];
+    char *cmd, *arg1, *arg2;
     int ret = -EINVAL;
     pid_t current_pid = task_pid_nr(current);
 
@@ -159,6 +180,7 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
         printk(KERN_ALERT "[PUBSUB] Failed to allocate kernel buffer.\n");
         return -ENOMEM;
     }
+
     if (copy_from_user(kernel_buffer, buffer, len)) {
         kfree(kernel_buffer);
         return -EFAULT;
@@ -167,106 +189,101 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
 
     printk(KERN_INFO "[PUBSUB] Received command '%s'\n", kernel_buffer);
 
-    if (sscanf(kernel_buffer, "%19s", instruction) == 1) {
-        /* SUBSCRIBE   */
-        if (strcmp(instruction, "/subscribe") == 0) {
-            if (sscanf(kernel_buffer, "/subscribe %63s", topic_name) == 1) {
-                ret = register_process_to_topic(topic_name, 's', current_pid);
-                if (ret == 0) {
-                    ret = len;
-                }
-            } else {
-                printk(KERN_INFO "[PUBSUB] Invalid /subscribe command format.\n");
-            }
+    if (!parse_command(kernel_buffer, &cmd, &arg1, &arg2)) {
+        printk(KERN_INFO "[PUBSUB] Invalid command format.\n");
+        kfree(kernel_buffer);
+        return -EINVAL;
+    }
 
-            /* UNSUBSCRIBE   */
-        } else if (strcmp(instruction, "/unsubscribe") == 0) {
-            if (sscanf(kernel_buffer, "/unsubscribe %63s", topic_name) == 1) {
-                topic_s *topic = broker_find_topic('s', topic_name);
-                if (topic) {
-                    // topic_remove_subscriber(topic, current_pid);
+    /* ==================== SUBSCRIBE ==================== */
+    if (strcmp(cmd, "/subscribe") == 0) {
+        if (!arg1) {
+            printk(KERN_INFO "[PUBSUB] Missing topic name for /subscribe.\n");
+        } else {
+            ret = register_process_to_topic(arg1, 's', current_pid);
+            if (ret == 0)
+                ret = len;
+        }
+    }
+
+    /* ==================== UNSUBSCRIBE ==================== */
+    else if (strcmp(cmd, "/unsubscribe") == 0) {
+        if (!arg1) {
+            printk(KERN_INFO "[PUBSUB] Missing topic name for /unsubscribe.\n");
+        } else {
+            topic_s *topic = find_topic(arg1);
+            if (topic) {
+                topic_remove_subscriber(topic, current_pid);
+                ret = len;
+            } else {
+                printk(KERN_INFO "[PUBSUB] Topic %s not found for unsubscribing.\n", arg1);
+            }
+        }
+    }
+
+    /* ==================== FETCH ==================== */
+    else if (strcmp(cmd, "/fetch") == 0) {
+        if (!arg1) {
+            printk(KERN_INFO "[PUBSUB] Missing topic name for /fetch.\n");
+        } else {
+            topic_s *topic = find_topic(arg1);
+            if (topic) {
+                char *topic_ptr = kmalloc(strlen(arg1) + 1, GFP_KERNEL);
+                if (topic_ptr) {
+                    strcpy(topic_ptr, arg1);
+                    filep->private_data = topic_ptr;
+                    printk(KERN_INFO "[PUBSUB] Topic '%s' set for read operations.\n", arg1);
                     ret = len;
                 } else {
-                    printk(KERN_INFO "[PUBSUB] Topic %s not found for unsubscribing.\n", topic_name);
-                    ret = -EINVAL;
+                    ret = -ENOMEM;
                 }
             } else {
-                printk(KERN_INFO "[PUBSUB] Invalid /unsubscribe command format.\n");
+                printk(KERN_INFO "[PUBSUB] Topic '%s' not found for fetching.\n", arg1);
             }
+        }
+    }
 
-           /* FETCH   */
-        } else if (strcmp(instruction, "/fetch") == 0) {
-            if (sscanf(kernel_buffer, "/fetch %63s", topic_name) == 1) {
-                topic_s *topic = broker_find_topic('s', topic_name);
-                if (topic) {
-                    char *topic_ptr = kmalloc(strlen(topic_name) + 1, GFP_KERNEL);
-                    if (topic_ptr) {
-                        strcpy(topic_ptr, topic_name);
-                        filep->private_data = topic_ptr;
-                        printk(KERN_INFO "[PUBSUB] Topic '%s' set for read operations.\n", topic_name);
+    /* ==================== PUBLISH ==================== */
+    else if (strcmp(cmd, "/publish") == 0) {
+        if (!arg1 || !arg2) {
+            printk(KERN_INFO "[PUBSUB] Missing topic or message for /publish.\n");
+        } else {
+            char *message_content = strchr(arg2, '"');
+            if (message_content) {
+                message_content++;
+                char *end_of_message = strrchr(message_content, '"');
+                if (end_of_message)
+                    *end_of_message = '\0';
+
+                ret = register_process_to_topic(arg1, 'p', current_pid);
+                if (ret == 0) {
+                    topic_s *topic = find_topic(arg1);
+                    if (topic) {
+                        topic_publish_message(topic, message_content, (short)strlen(message_content));
                         ret = len;
                     } else {
-                        ret = -ENOMEM;
+                        printk(KERN_ERR "[PUBSUB] Logic error: topic not found after successful registration.\n");
+                        ret = -EINVAL;
                     }
                 } else {
-                    printk(KERN_INFO "[PUBSUB] Topic '%s' not found for fetching.\n", topic_name);
-                    ret = -EINVAL;
+                    printk(KERN_INFO "[PUBSUB] Failed to register process for publishing to topic %s.\n", arg1);
                 }
             } else {
-                printk(KERN_INFO "[PUBSUB] Invalid /fetch command format.\n");
+                printk(KERN_INFO "[PUBSUB] Publish message must be enclosed in quotes.\n");
             }
-
-            /* PUBLISH   */
-        } else if (strcmp(instruction, "/publish") == 0) {
-            char *topic_start = strchr(kernel_buffer, ' ');
-
-            if (topic_start) {
-                topic_start++;
-                char *message_content = strchr(topic_start, '"');
-
-                if (message_content) {
-                    *message_content = '\0';
-                    message_content++;
-
-                    char *end_of_message = strrchr(message_content, '"');
-                    if (end_of_message) {
-                        *end_of_message = '\0';
-                        
-                        // 1. Registra o processo como publisher do tópico
-                        ret = register_process_to_topic(topic_start, 'p', current_pid);
-
-                        if (ret == 0) {
-                            // 2. Encontra o tópico recém-registrado para publicar a mensagem
-                            topic_s *topic = broker_find_topic('p', topic_start);
-                            if (topic) {
-                                // 3. Publica a mensagem no tópico
-                                topic_publish_message(topic, message_content, (short)strlen(message_content));
-                                ret = len;
-                            } else {
-                                // Este caso não deve ocorrer se register_process_to_topic foi bem-sucedido
-                                printk(KERN_ERR "[PUBSUB] Logic error: topic not found after successful registration.\n");
-                                ret = -EINVAL;
-                            }
-                        } else {
-                            printk(KERN_INFO "[PUBSUB] Failed to register process for publishing to topic %s.\n", topic_start);
-                            ret = -EINVAL;
-                        }
-                    } else {
-                        printk(KERN_INFO "[PUBSUB] Publish message is not properly quoted.\n");
-                    }
-                }
-            }
-        } else {
-            printk(KERN_INFO "[PUBSUB] Unknown command: %s\n", instruction);
         }
-    } else {
-        printk(KERN_INFO "[PUBSUB] Invalid command format.\n");
     }
+
+    /* ==================== UNKNOWN ==================== */
+    else {
+        printk(KERN_INFO "[PUBSUB] Unknown command: %s\n", cmd);
+    }
+
+    show_topics();
 
     kfree(kernel_buffer);
     return (ret > 0) ? len : ret;
 }
-
 
 static int dev_release(struct inode *inodep, struct file *filep)
 {
