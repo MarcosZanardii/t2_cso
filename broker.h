@@ -15,6 +15,8 @@ typedef struct {
 
 typedef struct {
     int pid;
+    int msg_count;                  
+    struct list_head message_queue;   
     struct list_head publish_node;    
     struct list_head subscriber_node; 
 } process_s;
@@ -23,7 +25,6 @@ typedef struct {
 typedef struct topic {
     char *name;
     int msg_count;
-    struct list_head message_queue;
     
     struct list_head publish_node;        
     struct list_head subscribe_node;      

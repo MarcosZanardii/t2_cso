@@ -6,11 +6,14 @@
 #include <unistd.h>
 
 #define BUFFER_LENGTH 256
+#define MAX_MSG_SIZE 250
 
 int main()
 {
     int ret, fd;
-    char stringToSend[BUFFER_LENGTH];
+    char commandToSend[BUFFER_LENGTH];
+    char messageBuffer[MAX_MSG_SIZE];
+    ssize_t bytes_read;
     
     printf("Starting PubSub user-space client...\n");
     
@@ -21,28 +24,49 @@ int main()
     }
     
     while (1) {
-        printf("Enter a command (/subscribe <id>, /publish <id> \"message\", /fetch <id> or press ENTER to exit):\n");
+        printf("\nEnter command (/subscribe, /publish, /fetch, /unsubscribe) or press ENTER to exit:\n> ");
         
-        memset(stringToSend, 0, BUFFER_LENGTH);
+        memset(commandToSend, 0, BUFFER_LENGTH);
         
-        if (fgets(stringToSend, BUFFER_LENGTH - 1, stdin) == NULL) {
+        if (fgets(commandToSend, BUFFER_LENGTH - 1, stdin) == NULL) {
             break;
         }
         
-        stringToSend[strcspn(stringToSend, "\n")] = 0;
+        commandToSend[strcspn(commandToSend, "\n")] = 0;
     
-        if (strlen(stringToSend) == 0) {
+        if (strlen(commandToSend) == 0) {
             break;
         }
 
-        ret = write(fd, stringToSend, strlen(stringToSend));
-        if (ret < 0) {
-            perror("Failed to write to the device");
+        if (strncmp(commandToSend, "/fetch", 6) == 0) {
+            ret = write(fd, commandToSend, strlen(commandToSend));
+            if (ret < 0) {
+                perror("Failed to write /fetch command to the device");
+                continue;
+            }
+
+            printf("--- Fetching messages ---\n");
+            
+            while ((bytes_read = read(fd, messageBuffer, sizeof(messageBuffer) - 1)) > 0) {
+                messageBuffer[bytes_read] = '\0';
+                printf("  [MSG]: %s\n", messageBuffer);
+            }
+
+            if (bytes_read == 0) {
+                printf("--- End of messages ---\n");
+                perror("An error occurred while reading messages");
+            }
+            
+        } else {
+            ret = write(fd, commandToSend, strlen(commandToSend));
+            if (ret < 0) {
+                perror("Failed to write to the device");
+            }
         }
     }
 
     close(fd);
-    printf("Exiting PubSub client.\n");
+    printf("\nExiting PubSub client.\n");
     
     return 0;
 }

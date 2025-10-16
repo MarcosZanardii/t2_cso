@@ -102,32 +102,58 @@ static int dev_open(struct inode *inodep, struct file *filep)
     return 0;
 }
 
-static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset)
+static ssize_t dev_read(struct file *filep, char __user *buffer, size_t len, loff_t *offset)
 {
-    int ret;
-    int pid = (int)task_pid_nr(current);
-    int topic_id;
+    char *topic_name;
+    topic_s *topic;
+    process_s *subscription = NULL; 
+    process_s *iter; 
+    message_s *message_to_read;
+    pid_t current_pid = task_pid_nr(current);
     
-    // Check if the file pointer has a topic associated with it (from a previous /fetch command)
     if (filep->private_data == NULL) {
-        printk(KERN_INFO "[PUBSUB] No topic set for reading. Please use /fetch first.\n");
-        return 0; // Return 0 to indicate no data
+        printk(KERN_INFO "[READ] No topic set. Use '/fetch <topic_name>' first.\n");
+        return 0;
     }
-    
-    // Cast the private data back to the correct type
-    topic_id = *(int *)filep->private_data;
+    topic_name = (char *)filep->private_data;
 
-    // Call the broker function to read a message for the given pid and topic
-    // NOTE: This broker function needs to be implemented to handle per-subscriber queues
-    // ret = broker_read_message_from_queue(pid, topic_id, buffer, len);
-
-    // If there are no more messages, clean up the private data
-    if (ret == 0) {
-        kfree(filep->private_data);
-        filep->private_data = NULL;
+    topic = find_topic(topic_name);
+    if (!topic) {
+        printk(KERN_WARNING "[READ] Fetched topic '%s' no longer exists.\n", topic_name);
+        return -ENOENT;
     }
+
+    list_for_each_entry(iter, &topic->process_subscribers, subscriber_node) {
+        if (iter->pid == current_pid) {
+            subscription = iter;
+            break;
+        }
+    }
+
+    if (!subscription) {
+        printk(KERN_WARNING "[READ] PID %d is not subscribed to topic '%s'.\n", current_pid, topic_name);
+        return -EPERM;
+    }
+
+    if (list_empty(&subscription->message_queue)) {
+        printk(KERN_INFO "[READ] No messages for PID %d in topic '%s'.\n", current_pid, topic_name);
+        return 0;
+    }
+
+    message_to_read = list_first_entry(&subscription->message_queue, message_s, link);
     
-    return ret;
+    if (copy_to_user(buffer, message_to_read->message, min(len, message_to_read->size))) {
+        return -EFAULT;
+    }
+
+    printk(KERN_INFO "[READ] Copied message for PID %d from topic '%s'.\n", current_pid, topic_name);
+    
+    list_del(&message_to_read->link);
+    kfree(message_to_read->message);
+    kfree(message_to_read);
+    subscription->msg_count--;
+
+    return min(len, message_to_read->size);
 }
 
 static int parse_command(char *input, char **cmd, char **arg1, char **arg2) {

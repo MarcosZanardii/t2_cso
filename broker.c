@@ -95,7 +95,6 @@ topic_s *create_topic(const char *name)
     }
 
     topic->msg_count = 0;
-    INIT_LIST_HEAD(&topic->message_queue);
     INIT_LIST_HEAD(&topic->publish_node);
     INIT_LIST_HEAD(&topic->subscribe_node);
     INIT_LIST_HEAD(&topic->process_subscribers);
@@ -118,6 +117,8 @@ process_s *create_process(int pid)
     }
 
     process->pid = pid;
+    process->msg_count = 0;
+    INIT_LIST_HEAD(&process->message_queue);
     INIT_LIST_HEAD(&process->publish_node);
     INIT_LIST_HEAD(&process->subscriber_node);
 
@@ -221,8 +222,8 @@ int register_process_to_topic(const char *topic_name, char list_type, int pid)
 
 int topic_publish_message(topic_s *topic, const char *message_data, short max_size)
 {
-    message_s *new_message;
-    message_s *oldest_message;
+    process_s *subscriber_entry;
+    message_s *msg_container;
     size_t data_size;
 
     if (!topic) {
@@ -230,99 +231,107 @@ int topic_publish_message(topic_s *topic, const char *message_data, short max_si
         return -EINVAL;
     }
 
-    if (max_msg_n > 0 && topic->msg_count >= max_msg_n) {
-        if (!list_empty(&topic->message_queue)) {
-            oldest_message = list_first_entry(&topic->message_queue, message_s, link);
-            printk(KERN_INFO "[PUBLISH] Topic '%s' reached limit (%d). Discarding oldest message.\n", topic->name, max_msg_n);
-            list_del(&oldest_message->link);
-            kfree(oldest_message->message);
-            kfree(oldest_message);
-            topic->msg_count--;
-        }
-    }
-
     data_size = strnlen(message_data, max_size) + 1;
-    new_message = kmalloc(sizeof(*new_message), GFP_KERNEL);
-    if (!new_message) {
-        return -ENOMEM;
+
+    printk(KERN_INFO "[PUBLISH] Distributing message in topic '%s' to all subscribers.\n", topic->name);
+
+    list_for_each_entry(subscriber_entry, &topic->process_subscribers, subscriber_node) {
+
+        if (max_msg_n > 0 && subscriber_entry->msg_count >= max_msg_n) {
+            printk(KERN_INFO "  -> Mailbox for PID %d is full. Overwriting oldest message (circular).\n", subscriber_entry->pid);
+
+            msg_container = list_first_entry(&subscriber_entry->message_queue, message_s, link);
+            list_move_tail(&msg_container->link, &subscriber_entry->message_queue);
+            kfree(msg_container->message);
+
+        } else {
+            msg_container = kmalloc(sizeof(*msg_container), GFP_KERNEL);
+            if (!msg_container) {
+                printk(KERN_WARNING "  -> kmalloc failed for message container. Skipping PID %d.\n", subscriber_entry->pid);
+                continue;
+            }
+            
+            list_add_tail(&msg_container->link, &subscriber_entry->message_queue);
+            subscriber_entry->msg_count++;
+        }
+
+        msg_container->message = kmalloc(data_size, GFP_KERNEL);
+        if (!msg_container->message) {
+            printk(KERN_ERR "  -> kmalloc failed for message data. Removing container for PID %d.\n", subscriber_entry->pid);
+            list_del(&msg_container->link);
+            kfree(msg_container);
+            subscriber_entry->msg_count--;
+            continue;
+        }
+        
+        strncpy(msg_container->message, message_data, data_size);
+        msg_container->size = data_size;
+        
+        printk(KERN_INFO "  -> Message delivered to PID %d. (Mailbox size: %d)\n", 
+               subscriber_entry->pid, subscriber_entry->msg_count);
     }
-
-    new_message->message = kmalloc(data_size, GFP_KERNEL);
-    if (!new_message->message) {
-        kfree(new_message);
-        return -ENOMEM;
-    }
-    strncpy(new_message->message, message_data, data_size);
-    new_message->size = data_size;
-
-    INIT_LIST_HEAD(&new_message->link);
-    list_add_tail(&new_message->link, &topic->message_queue);
-    topic->msg_count++;
-
-    printk(KERN_INFO "[PUBLISH] Message published to topic '%s'. Total: %d\n", topic->name, topic->msg_count);
 
     return 0;
 }
 
-void topic_remove_subscriber(topic_s *topic, int pid)
-{
+void topic_remove_subscriber(topic_s *topic, int pid) {
     process_s *process, *temp;
+    message_s *msg, *msg_temp;
 
-    if (!topic) {
-        printk(KERN_ERR "[REMOVE_SUB] Cannot remove from a NULL topic.\n");
-        return;
-    }
+    if (!topic) return;
 
     list_for_each_entry_safe(process, temp, &topic->process_subscribers, subscriber_node) {
         if (process->pid == pid) {
             printk(KERN_INFO "[REMOVE_SUB] Removing subscriber PID %d from topic '%s'.\n", pid, topic->name);
+            
+            // Limpa a fila de mensagens individual antes de remover a inscrição
+            printk(KERN_INFO "  -> Cleaning up message queue for PID %d.\n", pid);
+            list_for_each_entry_safe(msg, msg_temp, &process->message_queue, link) {
+                list_del(&msg->link);
+                kfree(msg->message);
+                kfree(msg);
+            }
+
             list_del(&process->subscriber_node);
             kfree(process);
             return;
         }
     }
-
     printk(KERN_WARNING "[REMOVE_SUB] Subscriber PID %d not found in topic '%s'.\n", pid, topic->name);
 }
 
 static void print_topic_details(topic_s *topic)
 {
-    process_s *proc_entry;
+    process_s *pub_entry;
+    process_s *sub_entry;
     message_s *msg_entry;
 
-    // Informação principal do tópico
-    printk(KERN_INFO "-> Topic: \"%s\" (Messages: %d)\n", topic->name, topic->msg_count);
+    printk(KERN_INFO "-> Topic: \"%s\"\n", topic->name);
 
-    // Lista de Publicadores (Publishers)
     printk(KERN_INFO "   - Publishers:");
     if (list_empty(&topic->process_publishers)) {
         printk(KERN_CONT " [None]\n");
     } else {
         printk(KERN_CONT "\n");
-        list_for_each_entry(proc_entry, &topic->process_publishers, publish_node) {
-            printk(KERN_INFO "     - PID: %d\n", proc_entry->pid);
+        list_for_each_entry(pub_entry, &topic->process_publishers, publish_node) {
+            printk(KERN_INFO "     - PID: %d\n", pub_entry->pid);
         }
     }
 
-    // Lista de Inscritos (Subscribers)
     printk(KERN_INFO "   - Subscribers:");
     if (list_empty(&topic->process_subscribers)) {
         printk(KERN_CONT " [None]\n");
     } else {
         printk(KERN_CONT "\n");
-        list_for_each_entry(proc_entry, &topic->process_subscribers, subscriber_node) {
-            printk(KERN_INFO "     - PID: %d\n", proc_entry->pid);
-        }
-    }
+        list_for_each_entry(sub_entry, &topic->process_subscribers, subscriber_node) {
+            
+            printk(KERN_INFO "     - PID: %d (Mailbox Messages: %d)\n", sub_entry->pid, sub_entry->msg_count);
 
-    // Fila de Mensagens
-    printk(KERN_INFO "   - Message Queue:");
-    if (list_empty(&topic->message_queue)) {
-        printk(KERN_CONT " [Empty]\n");
-    } else {
-        printk(KERN_CONT "\n");
-        list_for_each_entry(msg_entry, &topic->message_queue, link) {
-            printk(KERN_INFO "     - \"%s\"\n", msg_entry->message);
+            if (!list_empty(&sub_entry->message_queue)) {
+                list_for_each_entry(msg_entry, &sub_entry->message_queue, link) {
+                    printk(KERN_INFO "       - \"%s\"\n", msg_entry->message);
+                }
+            }
         }
     }
 }
